@@ -170,14 +170,14 @@ def run_agent(question: str, model: str) -> str:
         return ensure_reference_section(fallback, sources)
 
     client = OpenAI(api_key=api_key)
-    response = client.responses.create(
+    response = client.chat.completions.create(
         model=model,
-        input=[
+        messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": build_user_prompt(question, market_context)},
         ],
     )
-    output_text = response.output_text.strip()
+    output_text = (response.choices[0].message.content or "").strip()
     return ensure_reference_section(output_text, sources)
 
 
