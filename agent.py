@@ -2,7 +2,7 @@ import argparse
 import json
 import os
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import requests
 from openai import OpenAI
@@ -37,6 +37,10 @@ SYSTEM_PROMPT = """# Role (角色)
 3. 【防过时原则】：加密市场变化极快，如果你的底层知识库信息早于当前日期，必须优先使用外部工具（Search/API）获取最新情况。
 4. 【通俗化表达】：解释专业术语（如 TVL, AMM, ZK-Rollup）时，用大白话或类比，让非技术人员也能听懂，但通俗化解释不能偏离技术白皮书的原始定义（需引用白皮书或官方文档）。
 """
+
+DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
+DEFAULT_KIMI_MODEL = "moonshot-v1-8k"
+DEFAULT_KIMI_BASE_URL = "https://api.moonshot.cn/v1"
 
 COIN_HINTS = {
     "btc": "bitcoin",
@@ -139,7 +143,39 @@ def ensure_reference_section(answer: str, sources: List[Dict]) -> str:
     return answer + suffix
 
 
-def run_agent(question: str, model: str) -> str:
+def resolve_llm_client(model_override: Optional[str]) -> Tuple[Optional[OpenAI], Optional[str], str]:
+    provider = os.getenv("LLM_PROVIDER", "").strip().lower()
+    openai_key = os.getenv("OPENAI_API_KEY")
+    kimi_key = os.getenv("KIMI_API_KEY")
+
+    if provider in {"kimi", "moonshot"}:
+        if not kimi_key:
+            return None, None, "kimi"
+        base_url = os.getenv("KIMI_BASE_URL", DEFAULT_KIMI_BASE_URL)
+        model = model_override or os.getenv("KIMI_MODEL", DEFAULT_KIMI_MODEL)
+        return OpenAI(api_key=kimi_key, base_url=base_url), model, "kimi"
+
+    if openai_key:
+        model = model_override or os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
+        return OpenAI(api_key=openai_key), model, "openai"
+
+    if kimi_key:
+        base_url = os.getenv("KIMI_BASE_URL", DEFAULT_KIMI_BASE_URL)
+        model = model_override or os.getenv("KIMI_MODEL", DEFAULT_KIMI_MODEL)
+        return OpenAI(api_key=kimi_key, base_url=base_url), model, "kimi"
+
+    return None, None, "none"
+
+
+def missing_key_message(provider: str) -> str:
+    if provider == "kimi":
+        return "缺少 KIMI_API_KEY"
+    if provider == "openai":
+        return "缺少 OPENAI_API_KEY"
+    return "缺少 OPENAI_API_KEY 或 KIMI_API_KEY"
+
+
+def run_agent(question: str, model_override: Optional[str]) -> str:
     market_context = None
     sources: List[Dict] = []
 
@@ -152,8 +188,8 @@ def run_agent(question: str, model: str) -> str:
             except (requests.RequestException, ValueError):
                 market_context = None
 
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
+    client, model, provider = resolve_llm_client(model_override)
+    if client is None or model is None:
         data_line = "- 未查询到可靠的实时价格数据。"
         if market_context is not None:
             data_line = f"- 已查询 {market_context['coin_id']} 实时数据：`{json.dumps(market_context['price_data'], ensure_ascii=False)}`"
@@ -163,13 +199,12 @@ def run_agent(question: str, model: str) -> str:
             "📊 **核心数据**\n"
             f"{data_line}\n\n"
             "📝 **关键信息分析**\n"
-            "- 若需完整分析，请配置 OPENAI_API_KEY 后重试。\n\n"
+            f"- 若需完整分析，请配置 API Key（{missing_key_message(provider)}）后重试。\n\n"
             "📰 **近期动态/情绪**\n"
             "- 当前 MVP 未接入新闻 API。\n"
         )
         return ensure_reference_section(fallback, sources)
 
-    client = OpenAI(api_key=api_key)
     response = client.chat.completions.create(
         model=model,
         messages=[
@@ -186,8 +221,8 @@ def main() -> None:
     parser.add_argument("question", help="用户问题，例如：帮我看下 BTC 现在价格")
     parser.add_argument(
         "--model",
-        default=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"),
-        help="OpenAI model name",
+        default=None,
+        help="模型名称（用于覆盖环境变量默认值）",
     )
 
     args = parser.parse_args()
